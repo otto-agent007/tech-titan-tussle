@@ -1,0 +1,578 @@
+/**
+ * Mars arcade cabinet — fighter content.
+ *
+ * Content only: no rendering, no sprite paths. Fighter identities and likenesses
+ * follow the owner's direction, including Donald Trump (2026-10-10).
+ *
+ * Identity: TECHNOKING and SCAM ALTMAN are cartoon likenesses of Elon Musk and
+ * Sam Altman, TEFLON DON is Donald Trump, and THE CAPTAIN is Pop T. Owner naming
+ * update, 2026-11-03, follows the likeness decision of 2026-09-20,
+ * superseding the invented-archetype-only rule of 2026-09-19. The ids and move
+ * names below stay archetype-named on purpose: the rules do not depend on who a
+ * fighter looks like, and the art direction can move again without touching them.
+ *
+ * Positions and reaches are expressed in 320x224 screen pixels so the
+ * sprite pipeline and the fight rules share one coordinate space. Note that the
+ * stage is now wider than the 320 px screen; see `marsArcadeStage.ts`.
+ */
+
+export const MARS_ARCADE_FIGHTER_IDS = ['booster', 'oracle', 'captain', 'trump'] as const
+export type MarsArcadeFighterId = (typeof MARS_ARCADE_FIGHTER_IDS)[number]
+export const MARS_ARCADE_SELECT_LABELS: Record<MarsArcadeFighterId, string> = {
+  booster: 'TECHNOKING', oracle: 'SCAM ALTMAN', captain: 'Captain · Pop T', trump: 'TEFLON DON',
+}
+export type MarsArcadeButton = 'light' | 'heavy' | 'special'
+
+/**
+ * Where an attack arrives, which decides what a guard can stop.
+ *
+ * A standing guard stops `high` and `mid`. Nobody can crouch yet, so `low` passes
+ * every guard. Read only when `useBounds` is on; see `MarsArcadeRules`.
+ */
+export type MarsArcadeGuardHeight = 'high' | 'mid' | 'low'
+
+export interface MarsArcadeProjectileSpec {
+  speed: number
+  lifetimeFrames: number
+  maxHeight: number
+  /** Repeated arcing caps; damage and freeze use the move's editable tuning. */
+  capThrow?: { count: number; intervalFrames: number; range: number; height: number; arcHeight: number }
+}
+
+export interface MarsArcadeMove {
+  id: string
+  /** False while an action has not been designed; ignored by rules and CPU. */
+  enabled?: boolean
+  label: string
+  button: MarsArcadeButton
+  /** Frames before the hitbox exists. The move cannot hit during startup. */
+  startupFrames: number
+  /** Frames the hitbox is live. */
+  activeFrames: number
+  /** Frames of recovery after the hitbox closes. */
+  recoveryFrames: number
+  damage: number
+  /** Damage dealt through a successful block. */
+  chipDamage: number
+  /** Guard meter removed from a blocking defender. */
+  guardDamage: number
+  /** Horizontal range measured from the attacker's origin. */
+  reach: number
+  /** Highest defender foot height this move can touch. */
+  maxHeight: number
+  hitstunFrames: number
+  blockstunFrames: number
+  knockback: number
+  meterCost: number
+  meterGainOnHit: number
+  meterGainOnBlock: number
+  projectile?: MarsArcadeProjectileSpec
+  /**
+   * Strikes the opponent wherever they are. Facing, `reach` and `maxHeight` are
+   * not consulted: there is nowhere on the stage to go.
+   */
+  lockOn?: boolean
+  /** Stage-wide effect: character drawings carry hurt regions, not melee strike boxes. */
+  stageWide?: boolean
+  /** Cannot be blocked. Lands full damage and never touches the guard meter. */
+  unblockable?: boolean
+  /** Optional dev candidate: close-range distraction and rear reversal. */
+  pivot?: boolean
+  /** Where the attack arrives. Only a guard at that height stops it. */
+  guardHeight: MarsArcadeGuardHeight
+  /**
+   * Frames both fighters and the clock freeze when this move connects, hit or block.
+   * Read only when the `hitstop` rule is on.
+   */
+  hitstopFrames: number
+}
+
+export interface MarsArcadeFighter {
+  id: MarsArcadeFighterId
+  label: string
+  /** One line of flavour for the character-select card. */
+  blurb: string
+  health: number
+  walkSpeed: number
+  jumpVelocity: number
+  guardMax: number
+  /** Guard meter recovered per frame while neither blocking nor stunned. */
+  guardRegenPerFrame: number
+  /**
+   * Width of the body that pushes the other fighter away. One number per fighter and
+   * never per drawing, the fighting-game convention: a pushbox that changed with the
+   * pose would shove the opponent every time an arm moved.
+   */
+  pushboxWidth: number
+  unlockedByDefault: boolean
+  moves: Record<MarsArcadeButton, MarsArcadeMove>
+}
+
+export const MARS_ARCADE_METER_MAX = 100
+
+const boosterMoves: Record<MarsArcadeButton, MarsArcadeMove> = {
+  light: {
+    id: 'booster.padJab',
+    label: 'PAD JAB',
+    button: 'light',
+    startupFrames: 4,
+    activeFrames: 3,
+    recoveryFrames: 7,
+    damage: 5,
+    chipDamage: 1,
+    guardDamage: 6,
+    reach: 41,
+    maxHeight: 34,
+    hitstunFrames: 14,
+    blockstunFrames: 10,
+    knockback: 2,
+    meterCost: 0,
+    meterGainOnHit: 6,
+    meterGainOnBlock: 3,
+    guardHeight: 'mid',
+    hitstopFrames: 2,
+  },
+  heavy: {
+    id: 'booster.staticFire',
+    label: 'STATIC FIRE',
+    button: 'heavy',
+    startupFrames: 11,
+    activeFrames: 4,
+    recoveryFrames: 18,
+    damage: 13,
+    chipDamage: 3,
+    guardDamage: 16,
+    reach: 38,
+    maxHeight: 30,
+    hitstunFrames: 22,
+    blockstunFrames: 14,
+    knockback: 7,
+    meterCost: 0,
+    meterGainOnHit: 12,
+    meterGainOnBlock: 5,
+    guardHeight: 'mid',
+    hitstopFrames: 4,
+  },
+  special: {
+    // A Starlink laser from orbit. Owner direction, 2026-09-22: no telegraph and
+    // no escape. It lands the frame the button goes down, anywhere on the stage,
+    // through any guard. What keeps it fair is the price: two meter chunks for a
+    // hit smaller, per meter, than the captain's flyby, and a long recovery with
+    // the arm still raised to the sky.
+    id: 'booster.spaceLaser',
+    label: 'SPACE LASER',
+    button: 'special',
+    startupFrames: 0,
+    activeFrames: 1,
+    recoveryFrames: 28,
+    damage: 15,
+    chipDamage: 0,
+    guardDamage: 0,
+    // The whole stage, as the flyby. Not consulted by the rules (lockOn), but
+    // the harness and any reader of the frame data see an honest number.
+    reach: 480,
+    maxHeight: 999,
+    hitstunFrames: 24,
+    blockstunFrames: 0,
+    knockback: 0,
+    meterCost: 40,
+    meterGainOnHit: 0,
+    meterGainOnBlock: 0,
+    guardHeight: 'mid',
+    hitstopFrames: 6,
+    lockOn: true,
+    unblockable: true,
+  },
+}
+
+const oracleMoves: Record<MarsArcadeButton, MarsArcadeMove> = {
+  light: {
+    id: 'oracle.prompt',
+    label: 'PROMPT',
+    button: 'light',
+    startupFrames: 5,
+    activeFrames: 2,
+    recoveryFrames: 8,
+    damage: 4,
+    chipDamage: 1,
+    guardDamage: 5,
+    reach: 40,
+    maxHeight: 34,
+    hitstunFrames: 13,
+    blockstunFrames: 10,
+    knockback: 2,
+    meterCost: 0,
+    meterGainOnHit: 6,
+    meterGainOnBlock: 3,
+    guardHeight: 'mid',
+    hitstopFrames: 2,
+  },
+  heavy: {
+    id: 'oracle.hardCutoff',
+    label: 'HARD CUTOFF',
+    button: 'heavy',
+    startupFrames: 13,
+    activeFrames: 3,
+    recoveryFrames: 20,
+    damage: 11,
+    chipDamage: 2,
+    guardDamage: 14,
+    reach: 40,
+    maxHeight: 24,
+    hitstunFrames: 20,
+    blockstunFrames: 13,
+    knockback: 9,
+    meterCost: 0,
+    meterGainOnHit: 11,
+    meterGainOnBlock: 5,
+    // The sweep: its attack box sits at the ankles (cell rows 96-109), so a guard
+    // held at the head does not stop it. Only read with `useBounds` on.
+    guardHeight: 'low',
+    hitstopFrames: 4,
+  },
+  special: {
+    id: 'oracle.textBubble',
+    label: 'TEXT BUBBLE',
+    button: 'special',
+    startupFrames: 9,
+    activeFrames: 1,
+    recoveryFrames: 16,
+    damage: 10,
+    chipDamage: 3,
+    guardDamage: 12,
+    reach: 0,
+    maxHeight: 26,
+    hitstunFrames: 18,
+    blockstunFrames: 12,
+    knockback: 5,
+    meterCost: 20,
+    meterGainOnHit: 4,
+    meterGainOnBlock: 2,
+    guardHeight: 'mid',
+    hitstopFrames: 6,
+    projectile: {
+      speed: 3.4,
+      lifetimeFrames: 120,
+      // Below a jump apex (~35 px) so a well-timed jump clears the bubble.
+      maxHeight: 26,
+    },
+  },
+}
+
+const captainMoves: Record<MarsArcadeButton, MarsArcadeMove> = {
+  light: {
+    id: 'captain.palmJab',
+    label: 'PALM JAB',
+    button: 'light',
+    startupFrames: 6,
+    activeFrames: 3,
+    recoveryFrames: 10,
+    damage: 5,
+    chipDamage: 1,
+    guardDamage: 6,
+    reach: 34,
+    maxHeight: 34,
+    hitstunFrames: 14,
+    blockstunFrames: 10,
+    knockback: 2,
+    meterCost: 0,
+    meterGainOnHit: 6,
+    meterGainOnBlock: 3,
+    guardHeight: 'mid',
+    hitstopFrames: 2,
+  },
+  heavy: {
+    id: 'captain.runTheChecklist',
+    label: 'RUN THE CHECKLIST',
+    button: 'heavy',
+    startupFrames: 9,
+    activeFrames: 3,
+    recoveryFrames: 11,
+    damage: 9,
+    chipDamage: 2,
+    guardDamage: 12,
+    reach: 36,
+    maxHeight: 32,
+    hitstunFrames: 18,
+    blockstunFrames: 12,
+    knockback: 5,
+    meterCost: 0,
+    meterGainOnHit: 9,
+    meterGainOnBlock: 4,
+    guardHeight: 'mid',
+    hitstopFrames: 4,
+  },
+  special: {
+    id: 'captain.flyby',
+    stageWide: true,
+    label: 'DC-9 FLYBY',
+    button: 'special',
+    startupFrames: 26,
+    activeFrames: 8,
+    recoveryFrames: 22,
+    damage: 30,
+    chipDamage: 6,
+    guardDamage: 40,
+    // The whole stage, so the 26-frame telegraph stays the payoff it was written
+    // to be and cannot be answered by simply running to the far wall. Tracks
+    // MARS_ARCADE_STAGE.halfWidth * 2; `the flyby still covers the whole stage`
+    // fails if the stage is widened and this is left behind.
+    reach: 480,
+    maxHeight: 90,
+    hitstunFrames: 30,
+    blockstunFrames: 20,
+    knockback: 12,
+    meterCost: 70,
+    meterGainOnHit: 0,
+    meterGainOnBlock: 0,
+    guardHeight: 'mid',
+    hitstopFrames: 6,
+  },
+}
+
+const trumpMoves: Record<MarsArcadeButton, MarsArcadeMove> = {
+  light: { ...boosterMoves.light, id: 'trump.jab', label: 'JAB', reach: 44 },
+  heavy: {
+    ...boosterMoves.heavy, id: 'trump.windmill', label: 'WINDMILL',
+    startupFrames: 14, activeFrames: 5, recoveryFrames: 12, reach: 47, maxHeight: 34,
+  },
+  special: {
+    id: 'trump.capThrow', label: 'CAP THROW', button: 'special',
+    startupFrames: 56, activeFrames: 37, recoveryFrames: 16,
+    damage: 6, chipDamage: 1, guardDamage: 10, reach: 0, maxHeight: 999,
+    hitstunFrames: 30, blockstunFrames: 12, knockback: 0, meterCost: 40,
+    meterGainOnHit: 0, meterGainOnBlock: 0, guardHeight: 'high', hitstopFrames: 2,
+    projectile: { speed: 6, lifetimeFrames: 96, maxHeight: 999,
+      capThrow: { count: 3, intervalFrames: 18, range: 288, height: 90, arcHeight: 12 } },
+  },
+}
+
+export const MARS_ARCADE_FIGHTERS: Record<MarsArcadeFighterId, MarsArcadeFighter> = {
+  booster: {
+    id: 'booster',
+    label: 'TECHNOKING',
+    blurb: 'Goes up fast. Coming back down is the hard part.',
+    health: 100,
+    walkSpeed: 1.25,
+    jumpVelocity: 4.6,
+    guardMax: 90,
+    guardRegenPerFrame: 0.22,
+    pushboxWidth: 24,
+    unlockedByDefault: true,
+    moves: boosterMoves,
+  },
+  oracle: {
+    id: 'oracle',
+    label: 'SCAM ALTMAN',
+    blurb: 'Answers from anywhere on the stage. Runs out of room to think.',
+    health: 100,
+    walkSpeed: 1,
+    jumpVelocity: 4.4,
+    guardMax: 60,
+    guardRegenPerFrame: 0.14,
+    pushboxWidth: 24,
+    unlockedByDefault: true,
+    moves: oracleMoves,
+  },
+  captain: {
+    id: 'captain',
+    label: 'THE CAPTAIN',
+    blurb: 'Does not rush. Sets the cup down. Lands it once.',
+    health: 100,
+    walkSpeed: 0.95,
+    jumpVelocity: 4.2,
+    guardMax: 110,
+    guardRegenPerFrame: 0.3,
+    pushboxWidth: 24,
+    unlockedByDefault: false,
+    moves: captainMoves,
+  },
+  trump: {
+    id: 'trump', label: 'TEFLON DON',
+    blurb: 'A big wind-up. A bigger windmill.',
+    health: 100, walkSpeed: 1.25, jumpVelocity: 4.6,
+    guardMax: 90, guardRegenPerFrame: 0.22, pushboxWidth: 24,
+    unlockedByDefault: true, moves: trumpMoves,
+  },
+}
+
+/** Meter the captain banks for setting the cup down instead of swinging. */
+export const CAPTAIN_COMPOSURE_METER_GAIN = 14
+
+/**
+ * Playground tuning: the numbers the fighter playground edits and saves.
+ *
+ * The baked content above is the default. `marsArcadeTuning.json` is the file the
+ * playground writes and the game loads on top of it, so a tuning session survives a
+ * reload and ships. Reach and maxHeight are deliberately NOT tunable here: they are
+ * bound to the drawings by the animation table's reach rule.
+ */
+export interface MarsArcadeMoveTuning {
+  damage: number
+  chipDamage: number
+  guardDamage: number
+  knockback: number
+  hitstunFrames: number
+  blockstunFrames: number
+  hitstopFrames: number
+}
+
+/**
+ * The rule switches the playground can flip. Both ship on following the owner's
+ * combat-box approval and request to enable both rules (plan 0050).
+ *
+ * - `useBounds`: melee connects when an attack box drawn in the gym overlaps a hurt
+ *   box, instead of `|dx| <= reach`, and a guard only stops attacks at its height.
+ *   A pair with no boxes for the current drawings falls back to the reach check.
+ * - `hitstop`: every connect freezes both fighters and the clock for the move's
+ *   `hitstopFrames`.
+ */
+export interface MarsArcadeRules {
+  useBounds: boolean
+  hitstop: boolean
+}
+
+export const MARS_ARCADE_DEFAULT_RULES: Readonly<MarsArcadeRules> = { useBounds: true, hitstop: true }
+
+export interface MarsArcadeFighterTuning {
+  health: number
+  walkSpeed: number
+  jumpVelocity: number
+  guardMax: number
+  guardRegenPerFrame: number
+  moves: Record<MarsArcadeButton, MarsArcadeMoveTuning>
+}
+
+export interface MarsArcadeTuning {
+  version: number
+  stage: { gravity: number }
+  rules: MarsArcadeRules
+  fighters: Record<MarsArcadeFighterId, MarsArcadeFighterTuning>
+}
+
+export const MARS_ARCADE_TUNING_VERSION = 3
+
+/** Gravity as the content defines it; `marsArcadeGravity()` is what the rules read. */
+export const MARS_ARCADE_DEFAULT_GRAVITY = 0.28
+
+/** Separately registered candidate; the default Oracle move remains Text Bubble. */
+export const MARS_ARCADE_PIVOT_TIMING={windup:24,readingPause:120,slide:18,active:3,recovery:72} as const
+export const MARS_ARCADE_NON_PROFIT_PIVOT: Readonly<MarsArcadeMove> = {
+  id:'oracle.nonProfitPivot',label:'NON-PROFIT PIVOT',button:'special',
+  startupFrames:MARS_ARCADE_PIVOT_TIMING.windup+MARS_ARCADE_PIVOT_TIMING.readingPause+MARS_ARCADE_PIVOT_TIMING.slide,
+  activeFrames:MARS_ARCADE_PIVOT_TIMING.active,recoveryFrames:MARS_ARCADE_PIVOT_TIMING.recovery,
+  damage:18,chipDamage:0,guardDamage:0,reach:49,maxHeight:0,
+  hitstunFrames:18,blockstunFrames:0,knockback:0,
+  meterCost:60,meterGainOnHit:0,meterGainOnBlock:0,
+  guardHeight:'mid',hitstopFrames:3,unblockable:true,pivot:true,
+}
+export const MARS_ARCADE_COFOUNDER_TARGETS: readonly MarsArcadeFighterId[] = ['booster','oracle']
+let pivotPreview = false
+export function setMarsArcadePivotPreview(enabled:boolean):void { pivotPreview=enabled }
+export function marsArcadePivotPreviewEnabled():boolean { return pivotPreview }
+/** Retained art prototype: never equipped by regular play. */
+const shortPivot:Readonly<MarsArcadeMove>={...MARS_ARCADE_NON_PROFIT_PIVOT,id:'oracle.nonProfitPivotShort',startupFrames:42,recoveryFrames:21}
+/** Known art moves include the retained default and separately enabled candidate. */
+export function marsArcadeKnownMoves(fighter:MarsArcadeFighterId): readonly MarsArcadeMove[] {
+  return [...Object.values(MARS_ARCADE_FIGHTERS[fighter].moves),...(fighter==='oracle'?[MARS_ARCADE_NON_PROFIT_PIVOT,shortPivot]:[])]
+}
+
+let tuned: Record<MarsArcadeFighterId, MarsArcadeFighter> = MARS_ARCADE_FIGHTERS
+let gravity = MARS_ARCADE_DEFAULT_GRAVITY
+let rules: MarsArcadeRules = { ...MARS_ARCADE_DEFAULT_RULES }
+
+function mergeFighter(base: MarsArcadeFighter, tuning: MarsArcadeFighterTuning): MarsArcadeFighter {
+  const moves = { ...base.moves }
+  for (const button of ['light', 'heavy', 'special'] as MarsArcadeButton[]) {
+    moves[button] = { ...base.moves[button], ...tuning.moves[button] }
+  }
+  return {
+    ...base,
+    health: tuning.health,
+    walkSpeed: tuning.walkSpeed,
+    jumpVelocity: tuning.jumpVelocity,
+    guardMax: tuning.guardMax,
+    guardRegenPerFrame: tuning.guardRegenPerFrame,
+    moves,
+  }
+}
+
+/** Apply a tuning on top of the baked content. Pass null to return to the defaults. */
+export function setMarsArcadeTuning(tuning: MarsArcadeTuning | null): void {
+  if (!tuning) {
+    tuned = MARS_ARCADE_FIGHTERS
+    gravity = MARS_ARCADE_DEFAULT_GRAVITY
+    rules = { ...MARS_ARCADE_DEFAULT_RULES }
+    return
+  }
+  tuned = {
+    booster: mergeFighter(MARS_ARCADE_FIGHTERS.booster, tuning.fighters.booster),
+    oracle: mergeFighter(MARS_ARCADE_FIGHTERS.oracle, tuning.fighters.oracle),
+    captain: mergeFighter(MARS_ARCADE_FIGHTERS.captain, tuning.fighters.captain),
+    trump: mergeFighter(MARS_ARCADE_FIGHTERS.trump, tuning.fighters.trump),
+  }
+  gravity = tuning.stage.gravity
+  rules = { ...tuning.rules }
+}
+
+export function marsArcadeGravity(): number {
+  return gravity
+}
+
+/** The rule switches in force. */
+export function marsArcadeRules(): Readonly<MarsArcadeRules> {
+  return rules
+}
+
+/** The tuning currently in force, as the playground shows and saves it. */
+export function marsArcadeTuningInForce(): MarsArcadeTuning {
+  const pick = (fighter: MarsArcadeFighter): MarsArcadeFighterTuning => ({
+    health: fighter.health,
+    walkSpeed: fighter.walkSpeed,
+    jumpVelocity: fighter.jumpVelocity,
+    guardMax: fighter.guardMax,
+    guardRegenPerFrame: fighter.guardRegenPerFrame,
+    moves: {
+      light: pickMove(fighter.moves.light),
+      heavy: pickMove(fighter.moves.heavy),
+      special: pickMove(fighter.moves.special),
+    },
+  })
+  const pickMove = (move: MarsArcadeMove): MarsArcadeMoveTuning => ({
+    damage: move.damage,
+    chipDamage: move.chipDamage,
+    guardDamage: move.guardDamage,
+    knockback: move.knockback,
+    hitstunFrames: move.hitstunFrames,
+    blockstunFrames: move.blockstunFrames,
+    hitstopFrames: move.hitstopFrames,
+  })
+  return {
+    version: MARS_ARCADE_TUNING_VERSION,
+    stage: { gravity },
+    rules: { ...rules },
+    fighters: { booster: pick(marsArcadeFighter('booster')), oracle: pick(marsArcadeFighter('oracle')), captain: pick(marsArcadeFighter('captain')), trump: pick(marsArcadeFighter('trump')) },
+  }
+}
+
+/** The baked defaults as a tuning, for the playground's reset. */
+export function marsArcadeDefaultTuning(): MarsArcadeTuning {
+  const current = tuned
+  const currentGravity = gravity
+  const currentRules = rules
+  tuned = MARS_ARCADE_FIGHTERS
+  gravity = MARS_ARCADE_DEFAULT_GRAVITY
+  rules = { ...MARS_ARCADE_DEFAULT_RULES }
+  const defaults = marsArcadeTuningInForce()
+  tuned = current
+  gravity = currentGravity
+  rules = currentRules
+  return defaults
+}
+
+export function marsArcadeFighter(id: MarsArcadeFighterId): MarsArcadeFighter {
+  const fighter=tuned[id]
+  return id==='oracle'&&pivotPreview
+    ? {...fighter,moves:{...fighter.moves,special:MARS_ARCADE_NON_PROFIT_PIVOT}}
+    : fighter
+}
