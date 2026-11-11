@@ -13,7 +13,19 @@ export async function startArcadeFight(page: Page, openOptions = true) {
   await start.click()
   await expect(page.locator('#stage')).toBeVisible()
   if (openOptions) {
+    await openArcadeMenu(page)
     await page.getByText('Match options', { exact: true }).click()
     await page.getByText('Controls', { exact: true }).click()
+    await resumeArcade(page)
   }
+}
+
+export async function openArcadeMenu(page: Page) {
+  const menu = page.getByRole('dialog', { name: 'Arcade menu' })
+  if (!await menu.isVisible()) await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await expect(menu).toBeVisible()
+}
+
+export async function resumeArcade(page: Page) {
+  await page.getByRole('dialog', { name: 'Arcade menu' }).getByRole('button', { name: 'Resume', exact: true }).click()
 }

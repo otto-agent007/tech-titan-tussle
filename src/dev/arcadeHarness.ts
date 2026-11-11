@@ -65,6 +65,7 @@ import { loadArcadeBackdrop, type ArcadeBackdropImages } from './arcadeHarnessBa
 import { MOONBASE_PANORAMA } from '../game/marsArcadeArt'
 import { ARCADE_BACKGROUND_LABELS, isArcadeBackground, loadArcadeBackground, saveArcadeBackground, moonbasePanoramaLeft, MOONBASE_BACKGROUND_BANDS } from '../game/arcadeBackground'
 import { advanceExchange, EXCHANGE_END_FRAME } from './arcadeHarnessExchange'
+import { roundIsOver, roundRestartVisible } from './arcadeRoundRestart'
 import { DEFAULT_ARCADE_SOUND, loadArcadeSound, saveArcadeSound, marsArcadeSoundCues, MarsArcadeComboSound } from '../game/marsArcadeSfx'
 import { MarsArcadeSfxPlayer, type ArcadeAudioStatus } from '../arcade/marsArcadeSfxPlayer'
 import {GLYPH_HEIGHT} from './arcadePixelFont'
@@ -1071,11 +1072,13 @@ function formatEvent(event: MarsArcadeEvent, frame: number): string | null {
 
 export interface MarsArcadeSession {
   setActive(active: boolean): void
+  setPaused(paused: boolean): void
   startRound(): void
 }
 
 export async function mountMarsArcade(production = false): Promise<MarsArcadeSession> {
   let active = !production
+  let roundOverSince: number | null = null
   let soundSettings = loadArcadeSound()
   let soundStatus: ArcadeAudioStatus = 'loading'
   const comboSound = new MarsArcadeComboSound()
@@ -1157,8 +1160,11 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
   canvas.height = STAGE_HEIGHT * SCALE
   const resize = () => {
     if (production) {
-      canvas.style.width = '100%'
-      canvas.style.height = '100%'
+      const parent = canvas.parentElement
+      if (!parent) return
+      const scale = Math.min(parent.clientWidth / STAGE_WIDTH, parent.clientHeight / STAGE_HEIGHT)
+      canvas.style.width = `${STAGE_WIDTH * scale}px`
+      canvas.style.height = `${STAGE_HEIGHT * scale}px`
       return
     }
     // clientWidth includes the viewport's padding; a scale chosen from it overflows and CSS
@@ -1247,6 +1253,7 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
       case 'Space':
         if (harness.exchange && harness.state.frame >= EXCHANGE_END_FRAME) return true
         harness.paused = !harness.paused
+        if (production) clearInput()
         syncSound()
         return true
       case 'KeyN':
@@ -1324,7 +1331,7 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     }
   }
   window.addEventListener('keydown', (event) => {
-    if (!active) return
+    if (!active || menuOpen()) return
     sound?.unlock()
     // Native fields own navigation; buttons own activation, but not game letter keys.
     if (event.target instanceof HTMLElement) {
@@ -1338,6 +1345,7 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     if (combatKey || event.code === 'Space') event.preventDefault()
     if (event.repeat) return
     if (!activeDown&&command(event.code)) return
+    if (production && harness.paused) return
     const digit = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(event.code)
     const chosen = digit >= 0 ? FIGHTER_ORDER[digit] : undefined
     if (chosen) {
@@ -1348,13 +1356,27 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     }
     if (combatKey) {
       cancelExchange()
+      keyboardHeld.add(event.code)
       held.add(event.code)
       pending.add(event.code)
       recordMotion(event.code)
     }
   })
-  window.addEventListener('keyup', (event) => {held.delete(event.code);recordMotion()})
-  const clearInput = () => { held.clear(); padHeld.clear(); pending.clear();harness.pivotMotion=[createPivotMotion(),createPivotMotion()];harness.capMotion=[createCapMotion(),createCapMotion()] }
+  const keyboardHeld = new Set<string>()
+  const pointers = new Map<number, { code: string; button: HTMLButtonElement }>()
+  const menuOpen = () => production && Boolean(document.querySelector('#arcade-menu[open]'))
+  window.addEventListener('keyup', event => {
+    keyboardHeld.delete(event.code)
+    if (![...pointers.values()].some(pointer => pointer.code === event.code)) held.delete(event.code)
+    recordMotion()
+  })
+  const clearInput = () => {
+    held.clear(); keyboardHeld.clear(); padHeld.clear(); pending.clear()
+    const captured = [...pointers]
+    pointers.clear()
+    for (const [id, { button }] of captured) if (button.hasPointerCapture(id)) button.releasePointerCapture(id)
+    harness.pivotMotion=[createPivotMotion(),createPivotMotion()];harness.capMotion=[createCapMotion(),createCapMotion()]
+  }
   function cancelExchange(): void {
     if (!harness.exchange) return
     const completed=harness.state.frame>=EXCHANGE_END_FRAME
@@ -1363,6 +1385,8 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     if(completed)harness.paused=false
   }
   window.addEventListener('blur', clearInput)
+  window.addEventListener('pagehide', clearInput)
+  if (production) window.addEventListener('resize', clearInput)
   document.addEventListener('visibilitychange', () => { if (document.hidden) clearInput(); syncSound() })
 
   let padSides = new Map<number, ArcadeSide>()
@@ -1418,20 +1442,31 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
   document.querySelectorAll<HTMLButtonElement>('[data-combat]').forEach(button => {
     const code = button.dataset.combat ?? ''
     button.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return
+      if (event.button !== 0 || !active || menuOpen() || (production && harness.paused)) return
+      event.preventDefault()
       sound?.unlock()
       cancelExchange()
       button.setPointerCapture(event.pointerId)
+      pointers.set(event.pointerId, { code, button })
       held.add(code)
       pending.add(code)
       recordMotion(code)
     })
-    button.addEventListener('lostpointercapture', () => {held.delete(code);recordMotion()})
-    button.addEventListener('pointerup', () => {held.delete(code);recordMotion()})
-    button.addEventListener('pointercancel', () => { held.delete(code); pending.delete(code);recordMotion() })
+    const release = (event: PointerEvent) => {
+      if (!pointers.delete(event.pointerId)) return
+      if (!keyboardHeld.has(code) && ![...pointers.values()].some(pointer => pointer.code === code)) {
+        held.delete(code)
+        if (event.type === 'pointercancel' || event.type === 'lostpointercapture') pending.delete(code)
+      }
+      if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId)
+      recordMotion()
+    }
+    button.addEventListener('lostpointercapture', release)
+    button.addEventListener('pointerup', release)
+    button.addEventListener('pointercancel', release)
     // Keyboard or assistive-technology activation is a one-frame tap, never a stuck hold.
     button.addEventListener('click', event => {
-      if (event.detail === 0) { sound?.unlock(); cancelExchange(); pending.add(code);recordMotion(code) }
+      if (event.detail === 0 && active && !menuOpen() && !(production && harness.paused)) { sound?.unlock(); cancelExchange(); pending.add(code);recordMotion(code) }
     })
   })
 
@@ -1441,7 +1476,7 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     const deltaSeconds = Math.max(0, (now - previous) / 1000)
     previous = now
 
-    if (active) pollPads()
+    if (active && !menuOpen()) pollPads()
     const stepping = harness.stepRequested
     harness.stepRequested = false
     if (active && (!harness.paused || stepping)) {
@@ -1540,12 +1575,6 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     }
     const capStatus=document.querySelector<HTMLElement>('#cap-status')
     if(capStatus) { const text=capAccessibleStatus(harness.state); if(capStatus.textContent!==text)capStatus.textContent=text;capStatus.hidden=!text }
-    for(const button of document.querySelectorAll<HTMLButtonElement>('[data-pivot-down]')){
-      const side=Number(button.dataset.pivotDown)===0?0:1
-      const id=harness.state.fighters[side].id
-      const hidden=id!=='trump'&&(id!=='oracle'||!marsArcadePivotPreviewEnabled())
-      if(button.hidden!==hidden)button.hidden=hidden
-    }
     const title = document.querySelector<HTMLElement>('#stage-title')
     if (title) {
       const versus = `${marsArcadeFighter(harness.leftId).label} vs ${marsArcadeFighter(harness.rightId).label}${harness.humanRight ? '' : ' (CPU)'}`
@@ -1562,11 +1591,26 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
     }
     const events = harness.log.join('\n') || '(no events yet)'
     if (logPanel.textContent !== events) logPanel.textContent = events
+    const roundRestart = document.querySelector<HTMLButtonElement>('#round-restart')
+    if (roundRestart) {
+      const over = roundIsOver(harness.state.phase)
+      if (!over) roundOverSince = null
+      else if (roundOverSince === null) roundOverSince = performance.now()
+      const show = roundRestartVisible({ phase: harness.state.phase, paused: harness.paused, exchange: harness.exchange, overSinceMs: roundOverSince, nowMs: performance.now() })
+      if (roundRestart.hidden === show) {
+        roundRestart.hidden = !show
+        // A keyboard player can press Enter at once; R still works anywhere.
+        if (show) roundRestart.focus({ preventScroll: true })
+        else if (document.activeElement === roundRestart) canvas.focus({ preventScroll: true })
+      }
+    }
     const pause = document.querySelector<HTMLButtonElement>('[data-command="Space"]')
     if (pause) {
       pause.disabled = harness.exchange && harness.state.frame >= EXCHANGE_END_FRAME
       pause.textContent = pause.disabled ? 'Exchange complete' : harness.paused ? 'Resume' : 'Pause'
     }
+    const playerTwoControls = document.querySelector<HTMLElement>('#player-two-controls')
+    if (playerTwoControls) playerTwoControls.hidden = !harness.humanRight
     for (const select of document.querySelectorAll<HTMLSelectElement>('[data-fighter]')) {
       select.value = select.dataset.fighter === '0' ? harness.leftId : harness.rightId
     }
@@ -1585,6 +1629,11 @@ export async function mountMarsArcade(production = false): Promise<MarsArcadeSes
   return {
     setActive(value) {
       active = value
+      clearInput()
+      syncSound()
+    },
+    setPaused(value) {
+      harness.paused = value
       clearInput()
       syncSound()
     },

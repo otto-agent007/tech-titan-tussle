@@ -19,7 +19,7 @@ npm run dev        # http://localhost:5173
 | Heavy | K | . |
 | Special | L | / |
 
-Space pauses, R restarts the round, T switches the opponent between CPU and a second player, and G changes difficulty. A standard controller works too: left stick or D-pad to move, face buttons to attack, Start to pause and Back to restart. Every control also has an on-screen button.
+Space pauses, R restarts the round, T switches the opponent between CPU and a second player, and G changes difficulty. A standard controller works too: left stick or D-pad to move, face buttons to attack, Start to pause and Back to restart. Every control also has an on-screen button: movement and attacks sit beside or below the arena, and Menu pauses the fight and holds restart, sound and match options. A Restart round button appears by itself when a round ends.
 
 ## Build and test
 
